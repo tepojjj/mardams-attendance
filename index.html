@@ -1382,7 +1382,7 @@
       </div>
       <table class="browse-table drilldown-table">
         <thead>
-          <tr><th>Date</th><th>Employee</th><th>AM In</th><th>Lunch Out</th><th>PM In</th><th>PM Out</th><th>OT In</th><th>OT Out</th><th>Status</th></tr>
+          <tr><th>Date</th><th>Employee</th><th>AM In</th><th>Lunch Out</th><th>PM In</th><th>PM Out</th><th>OT In</th><th>OT Out</th><th>Status</th><th></th></tr>
         </thead>
         <tbody id="attendanceReportTbody"></tbody>
       </table>
@@ -1987,7 +1987,7 @@
     const from = document.getElementById('attFrom').value;
     const to = document.getElementById('attTo').value;
     const tbody = document.getElementById('attendanceReportTbody');
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;">Loading…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;">Loading…</td></tr>';
     document.getElementById('attendanceReportEmpty').style.display = 'none';
     try{
       const params = new URLSearchParams({ report: '1' });
@@ -2042,8 +2042,104 @@
         <td>${formatTimeStamp(r.otIn)}</td>
         <td>${formatTimeStamp(r.otOut)}</td>
         <td>${statusHtml || '—'}</td>
+        <td style="white-space:nowrap;">
+          <button type="button" class="ghost edit-btn" onclick="openAttendanceEdit('${escapeHtml(r.username)}','${escapeHtml(r.date)}')">Edit</button>
+          <button type="button" class="ghost danger-btn" onclick="deleteAttendanceRecord('${escapeHtml(r.username)}','${escapeHtml(r.date)}')">Delete</button>
+        </td>
       </tr>`;
     }).join('');
+  }
+
+  // ---- Editing / deleting individual attendance records ----
+  // Accounting and Super Admin only — the same two roles who can see this
+  // report at all (canSeePayroll()), and the API enforces this
+  // server-side regardless of what the UI shows.
+  // A punch's Asia/Manila clock time (HH:MM), for pre-filling the edit form.
+  function timeInputValue(iso){
+    if(!iso) return '';
+    return new Date(iso).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Asia/Manila' }).slice(0, 5);
+  }
+  // Turns a date (YYYY-MM-DD) + a Manila-local HH:MM into the UTC ISO
+  // timestamp the backend stores. Manila has no DST, so a fixed +08:00
+  // offset is always correct.
+  function manilaTimeToIso(dateStr, hhmm){
+    if(!hhmm) return null;
+    return new Date(`${dateStr}T${hhmm}:00+08:00`).toISOString();
+  }
+
+  function openAttendanceEdit(username, date){
+    const r = cachedAttendanceReport.find(x => x.username === username && x.date === date) || { username, date };
+    document.getElementById('attendanceEditSub').textContent = `${username} — ${date}`;
+    document.getElementById('attendanceEditMorningIn').value = timeInputValue(r.morningIn);
+    document.getElementById('attendanceEditNoonOut').value = timeInputValue(r.noonOut);
+    document.getElementById('attendanceEditAfternoonIn').value = timeInputValue(r.afternoonIn);
+    document.getElementById('attendanceEditAfternoonOut').value = timeInputValue(r.afternoonOut);
+    document.getElementById('attendanceEditOtIn').value = timeInputValue(r.otIn);
+    document.getElementById('attendanceEditOtOut').value = timeInputValue(r.otOut);
+    document.getElementById('attendanceEditError').textContent = '';
+    document.getElementById('attendanceEditOverlay').dataset.username = username;
+    document.getElementById('attendanceEditOverlay').dataset.date = date;
+    document.getElementById('attendanceEditOverlay').classList.add('open');
+  }
+
+  function closeAttendanceEdit(){
+    document.getElementById('attendanceEditOverlay').classList.remove('open');
+  }
+
+  async function saveAttendanceEdit(){
+    const overlay = document.getElementById('attendanceEditOverlay');
+    const username = overlay.dataset.username;
+    const date = overlay.dataset.date;
+    const errEl = document.getElementById('attendanceEditError');
+    errEl.textContent = '';
+
+    const body = {
+      username, date,
+      morningIn: manilaTimeToIso(date, document.getElementById('attendanceEditMorningIn').value),
+      noonOut: manilaTimeToIso(date, document.getElementById('attendanceEditNoonOut').value),
+      afternoonIn: manilaTimeToIso(date, document.getElementById('attendanceEditAfternoonIn').value),
+      afternoonOut: manilaTimeToIso(date, document.getElementById('attendanceEditAfternoonOut').value),
+      otIn: manilaTimeToIso(date, document.getElementById('attendanceEditOtIn').value),
+      otOut: manilaTimeToIso(date, document.getElementById('attendanceEditOtOut').value)
+    };
+
+    try{
+      const res = await fetch('/api/attendance', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(body)
+      });
+      if(handleAuthFailure(res.status)) return;
+      const data = await res.json();
+      if(!res.ok){
+        errEl.textContent = data.error || 'Could not save.';
+        return;
+      }
+      closeAttendanceEdit();
+      loadAttendanceReport();
+    }catch(e){
+      errEl.textContent = 'Could not reach the server. Please try again.';
+    }
+  }
+
+  async function deleteAttendanceRecord(username, date){
+    if(!confirm(`Delete ${username}'s attendance record for ${date}? This cannot be undone.`)) return;
+    try{
+      const res = await fetch(`/api/attendance?${new URLSearchParams({ username, date })}`, {
+        method: 'DELETE',
+        headers: { ...authHeaders() }
+      });
+      if(handleAuthFailure(res.status)) return;
+      if(!res.ok){
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Could not delete that record.');
+        return;
+      }
+    }catch(e){
+      alert('Could not reach the server. Please try again.');
+      return;
+    }
+    loadAttendanceReport();
   }
 
   // ---- Payroll ----
@@ -2686,6 +2782,37 @@
     showLogin();
   }
 </script>
+
+  <div class="drilldown-overlay" id="attendanceEditOverlay" onclick="if(event.target===this) closeAttendanceEdit();">
+    <div class="drilldown-modal" style="max-width:380px;">
+      <div class="drilldown-head">
+        <div>
+          <div class="drilldown-title">Edit Attendance</div>
+          <div class="drilldown-sub" id="attendanceEditSub">—</div>
+        </div>
+        <button type="button" class="drilldown-close" onclick="closeAttendanceEdit();">✕</button>
+      </div>
+      <div class="drilldown-body" style="padding:18px; max-height:70vh; overflow:auto;">
+        <div class="user-form" style="flex-direction:column; align-items:stretch;">
+          <div class="drilldown-sub" style="margin-bottom:2px;">Times are in Asia/Manila time. Leave a field blank to clear that punch.</div>
+          <label style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-top:10px;">Morning In</label>
+          <input type="time" id="attendanceEditMorningIn">
+          <label style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-top:10px;">Lunch Out</label>
+          <input type="time" id="attendanceEditNoonOut">
+          <label style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-top:10px;">Afternoon In</label>
+          <input type="time" id="attendanceEditAfternoonIn">
+          <label style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-top:10px;">Afternoon Out</label>
+          <input type="time" id="attendanceEditAfternoonOut">
+          <label style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-top:10px;">OT In</label>
+          <input type="time" id="attendanceEditOtIn">
+          <label style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-top:10px;">OT Out</label>
+          <input type="time" id="attendanceEditOtOut">
+          <div class="login-error" id="attendanceEditError"></div>
+          <button class="primary" style="margin-top:12px;" onclick="saveAttendanceEdit()">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div class="drilldown-overlay" id="payrollSettingsOverlay" onclick="if(event.target===this) closePayrollSettingsEdit();">
     <div class="drilldown-modal" style="max-width:380px;">

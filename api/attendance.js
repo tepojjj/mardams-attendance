@@ -137,5 +137,75 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // Correct a specific day's punches for a specific employee — Accounting
+  // or the Super Admin only (the same two roles who can see the
+  // Attendance Report and run Payroll in the first place). Any of the six
+  // punch fields can be sent: a valid ISO timestamp sets it, null clears
+  // it, and omitting a field leaves it as-is. If no record exists yet for
+  // that employee/date, one is created.
+  if (req.method === 'PATCH') {
+    const auth = requireRole(req, res, ['super_admin', 'accounting']);
+    if (!auth) return;
+
+    let body = req.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body || '{}');
+      } catch (e) {
+        res.status(400).json({ error: 'Invalid JSON' });
+        return;
+      }
+    }
+    body = body || {};
+
+    const username = String(body.username || '').trim().toLowerCase();
+    const date = String(body.date || '');
+    if (!username || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: 'Missing or invalid username/date' });
+      return;
+    }
+
+    const key = fieldKey(date, username);
+    const existingRaw = await kv.hget(KEY, key);
+    const existing = existingRaw ? (typeof existingRaw === 'string' ? JSON.parse(existingRaw) : existingRaw) : blankRecord(username, date);
+
+    const record = { ...existing, username, date };
+    for (const field of ['morningIn', 'noonOut', 'afternoonIn', 'afternoonOut', 'otIn', 'otOut']) {
+      if (body[field] === undefined) continue;
+      if (body[field] === null || body[field] === '') {
+        record[field] = null;
+        continue;
+      }
+      const d = new Date(body[field]);
+      if (isNaN(d.getTime())) {
+        res.status(400).json({ error: `Invalid timestamp for ${field}` });
+        return;
+      }
+      record[field] = d.toISOString();
+    }
+
+    await kv.hset(KEY, { [key]: JSON.stringify(record) });
+    res.status(200).json({ ok: true, record });
+    return;
+  }
+
+  // Remove a day's attendance record entirely — same restriction as
+  // editing above.
+  if (req.method === 'DELETE') {
+    const auth = requireRole(req, res, ['super_admin', 'accounting']);
+    if (!auth) return;
+
+    const username = String(req.query.username || '').trim().toLowerCase();
+    const date = String(req.query.date || '');
+    if (!username || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: 'Missing or invalid username/date' });
+      return;
+    }
+
+    await kv.hdel(KEY, fieldKey(date, username));
+    res.status(200).json({ ok: true });
+    return;
+  }
+
   res.status(405).send('Method not allowed');
 };
